@@ -1,0 +1,43 @@
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: pinesphere
+      POSTGRES_PASSWORD: pinesphere
+      POSTGRES_DB: pinesphere
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pinesphere"]
+      interval: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+
+  backend:
+    build: ./backend
+    env_file: ./backend/.env
+    environment:
+      DATABASE_URL: postgresql+psycopg://pinesphere:pinesphere@db:5432/pinesphere
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      db: { condition: service_healthy }
+      redis: { condition: service_started }
+    ports: ["8000:8000"]
+
+  worker:
+    build: ./backend
+    command: celery -A app.worker.celery_app worker -l info
+    env_file: ./backend/.env
+    environment:
+      DATABASE_URL: postgresql+psycopg://pinesphere:pinesphere@db:5432/pinesphere
+      REDIS_URL: redis://redis:6379/0
+    depends_on: [backend]
+
+  frontend:
+    build: ./frontend
+    depends_on: [backend]
+    ports: ["8080:80"]
+
+volumes:
+  pgdata:

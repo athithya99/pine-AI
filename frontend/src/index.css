@@ -1,0 +1,24 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --color-pine-50: #eef7f4;
+  --color-pine-100: #d5ece4;
+  --color-pine-500: #2a8a72;
+  --color-pine-600: #1f6f5c;
+  --color-pine-700: #185848;
+  --color-pine-900: #0e3329;
+}
+
+body { @apply bg-slate-50 text-slate-800 antialiased; }
+
+@utility btn { @apply inline-flex items-center justify-center gap-1.5 rounded-lg px-3.5 py-2 text-sm font-medium transition disabled:opacity-50 disabled:cursor-not-allowed; }
+@utility btn-primary { @apply inline-flex items-center justify-center gap-1.5 rounded-lg px-3.5 py-2 text-sm font-medium transition disabled:opacity-50 disabled:cursor-not-allowed bg-pine-600 text-white hover:bg-pine-700; }
+@utility btn-secondary { @apply inline-flex items-center justify-center gap-1.5 rounded-lg px-3.5 py-2 text-sm font-medium transition disabled:opacity-50 disabled:cursor-not-allowed border border-slate-300 bg-white text-slate-700 hover:bg-slate-50; }
+@utility btn-danger { @apply inline-flex items-center justify-center gap-1.5 rounded-lg px-3.5 py-2 text-sm font-medium transition disabled:opacity-50 disabled:cursor-not-allowed border border-red-200 bg-white text-red-600 hover:bg-red-50; }
+@utility input { @apply w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-pine-500 focus:ring-2 focus:ring-pine-100 disabled:bg-slate-50 disabled:text-slate-500; }
+@utility label { @apply mb-1 block text-xs font-medium text-slate-600; }
+@utility card { @apply rounded-xl border border-slate-200 bg-white; }
+@utility th { @apply px-4 py-2.5 text-left text-xs font-semibold uppercase tracking-wide text-slate-500; }
+@utility td { @apply px-4 py-3 text-sm; }
+@utility badge { @apply inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium; }
