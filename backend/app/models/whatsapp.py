@@ -98,6 +98,9 @@ class Conversation(IdTimestampMixin, TenantMixin, Base):
     last_message_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     last_inbound_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # 24h window
     last_message_preview: Mapped[str | None] = mapped_column(String(200))
+    # buyer bot handed the chat to staff (FR-M10-05): asked for a person, complaint, or a question it can't answer
+    handover_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    handover_reason: Mapped[str | None] = mapped_column(String(200))
 
 
 def _now() -> datetime:
@@ -142,6 +145,8 @@ class MessageTemplate(IdTimestampMixin, TenantMixin, Base):
     language: Mapped[str] = mapped_column(String(10), default="en")
     category: Mapped[TemplateCategory] = mapped_column(Enum(TemplateCategory, name="template_category"))
     header_text: Mapped[str | None] = mapped_column(String(60))
+    # None/TEXT = text header (or none); IMAGE / DOCUMENT = a media header filled in at send time (M9 campaigns)
+    header_format: Mapped[str | None] = mapped_column(String(10))
     body: Mapped[str] = mapped_column(Text)
     footer: Mapped[str | None] = mapped_column(String(60))
     buttons: Mapped[list | None] = mapped_column(JSONB)  # [{"type":"QUICK_REPLY","text":"Order now"}]

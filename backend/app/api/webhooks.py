@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json
 import logging
+import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from sqlalchemy import select
@@ -68,4 +69,42 @@ async def receive_whatsapp(request: Request, db: Session = Depends(get_db)):
     db.commit()
     # acknowledge fast; processing happens in the background (NFR-07)
     process_webhook_event.delay(str(event.id))
+    return {"status": "ok"}
+
+
+@router.post("/razorpay/{tenant_id}")
+async def receive_razorpay(tenant_id: uuid.UUID, request: Request, db: Session = Depends(get_db)):
+    """Razorpay calls this when a payment link is paid. Set this URL + secret in Razorpay → Webhooks."""
+    from app.models import PaymentGatewayAccount, PaymentLink
+    from app.services import orders as order_svc
+    from app.services import payments as pay_svc
+    from app.services.gateways import GatewayError, RazorpayGateway
+
+    raw = await request.body()
+    account = db.scalar(select(PaymentGatewayAccount).where(PaymentGatewayAccount.tenant_id == tenant_id))
+    try:
+        gateway = RazorpayGateway(account) if account else None
+    except GatewayError:
+        gateway = None
+    if gateway is None or not gateway.verify_webhook(raw, request.headers.get("X-Razorpay-Signature")):
+        log.warning("Rejected Razorpay webhook for tenant %s: bad signature", tenant_id)
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid signature")
+    try:
+        payload = json.loads(raw)
+    except ValueError:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid JSON") from None
+    db.add(WebhookEvent(source="razorpay", payload=payload, processed=True))
+    if payload.get("event") == "payment_link.paid":
+        plink = payload.get("payload", {}).get("payment_link", {}).get("entity", {})
+        pay = payload.get("payload", {}).get("payment", {}).get("entity", {})
+        link = db.scalar(select(PaymentLink).where(PaymentLink.tenant_id == tenant_id,
+                                                   PaymentLink.gateway_link_id == plink.get("id")).with_for_update())
+        if link is not None:
+            from decimal import Decimal
+
+            amount = Decimal(pay.get("amount", 0)) / 100 if pay.get("amount") else None
+            pay_svc.link_paid(db, link, gateway_payment_id=pay.get("id"), amount=amount, method=pay.get("method"))
+        else:
+            log.warning("Razorpay webhook for unknown link %s", plink.get("id"))
+    order_svc.commit_and_send(db)
     return {"status": "ok"}

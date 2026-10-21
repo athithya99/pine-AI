@@ -55,8 +55,7 @@ TRANSITIONS: dict[OrderStatus, set[OrderStatus]] = {
 }
 EDITABLE = {S.draft, S.quoted, S.expired, S.confirmed, S.on_hold}
 BUYER_CAN_CANCEL = {S.quoted, S.expired, S.confirmed, S.on_hold}
-# orders that count towards what the buyer owes (until the M7 ledger takes over)
-EXPOSURE = (S.approved, S.invoiced, S.dispatched, S.delivered)
+EXPOSURE = (S.approved,)  # approved but not invoiced; invoiced orders are in the ledger
 
 LABELS = {
     S.draft: "Draft", S.quoted: "Quoted", S.expired: "Expired", S.confirmed: "Confirmed", S.on_hold: "On hold",
@@ -157,15 +156,15 @@ def _lines_snapshot(order: Order) -> list[dict]:
 
 # ---------------- credit ----------------
 def credit_exposure(db: Session, customer: Customer, exclude_order_id: uuid.UUID | None = None) -> Decimal:
-    """What the buyer owes now: opening balance + approved/invoiced orders.
+    """What the buyer owes now: ledger balance (opening + invoices - payments - credit notes, M7)
+    plus approved orders that are not invoiced yet."""
+    from app.services.invoices import balance
 
-    Payments and credit notes arrive with M7/M8; then this becomes the ledger balance.
-    """
     q = select(func.coalesce(func.sum(Order.grand_total), 0)).where(
         Order.tenant_id == customer.tenant_id, Order.customer_id == customer.id, Order.status.in_(EXPOSURE))
     if exclude_order_id:
         q = q.where(Order.id != exclude_order_id)
-    return money(Decimal(customer.opening_balance or 0) + Decimal(db.scalar(q)))
+    return money(balance(db, customer) + Decimal(db.scalar(q)))
 
 
 def hold_reasons(db: Session, order: Order, customer: Customer) -> list[str]:
@@ -339,15 +338,17 @@ def _event(db: Session, order: Order, kind: str, *, frm: OrderStatus | None = No
 
 
 def _move(db: Session, order: Order, to: OrderStatus, *, user: User | None = None, actor: str | None = None,
-          remark: str | None = None, notify: bool = True, revised: bool = False) -> None:
+          remark: str | None = None, notify: bool = True, revised: bool = False) -> OrderEvent:
     frm = order.status
     if to not in TRANSITIONS[frm]:
         raise OrderError(f"Cannot move order from {label(frm)} to {label(to)}", "invalid_transition", 409)
     order.status = to
     db.flush()
-    _event(db, order, "status", frm=frm, to=to, user=user, actor=actor, remark=remark, notify=notify, revised=revised)
+    ev = _event(db, order, "status", frm=frm, to=to, user=user, actor=actor, remark=remark, notify=notify,
+                revised=revised)
     audit.record(db, user, "order", order.id, "update", {"status": frm.value}, {"status": to.value},
                  tenant_id=order.tenant_id)
+    return ev
 
 
 # ---------------- actions ----------------
@@ -490,8 +491,11 @@ def cancel(db: Session, order: Order, reason: str | None, *, user: User | None =
 
 
 def mark_invoiced(db: Session, user: User, order: Order, invoice_number: str, invoice_date: date | None,
-                  invoiced: dict[uuid.UUID, Decimal]) -> Order:
-    """FR-M6-09: one invoice per order; invoiced qty may be lower than ordered (short supply)."""
+                  invoiced: dict[uuid.UUID, Decimal], notify: bool = True) -> OrderEvent:
+    """FR-M6-09: one invoice per order; invoiced qty may be lower than ordered (short supply).
+
+    Called by the invoice service (M7), which creates the invoice and its ledger entry.
+    """
     if order.status != S.approved:
         raise OrderError(f"Cannot move order from {label(order.status)} to Invoiced", "invalid_transition", 409)
     ids = {l.id for l in order.lines}
@@ -509,8 +513,24 @@ def mark_invoiced(db: Session, user: User, order: Order, invoice_number: str, in
     remark = f"Invoice {order.invoice_number}"
     if short:
         remark += "; short supply: " + ", ".join(f"{l.sku} {_fmt_qty(l.quantity - l.invoiced_qty)}" for l in short)
-    _move(db, order, S.invoiced, user=user, remark=remark)
-    return order
+    return _move(db, order, S.invoiced, user=user, remark=remark, notify=notify)
+
+
+def reopen_after_invoice_cancel(db: Session, user: User | None, order: Order, invoice_number: str) -> None:
+    """Cancelling the invoice of an Invoiced (not yet dispatched) order puts it back to Approved."""
+    frm = order.status
+    order.status = S.approved
+    order.invoice_id = None
+    order.invoice_number = None
+    order.invoice_date = None
+    order.invoiced_at = None
+    for l in order.lines:
+        l.invoiced_qty = None
+    db.flush()
+    _event(db, order, "status", frm=frm, to=S.approved, user=user,
+           remark=f"Invoice {invoice_number} cancelled; order is back to Approved")
+    audit.record(db, user, "order", order.id, "update", {"status": frm.value}, {"status": S.approved.value},
+                 tenant_id=order.tenant_id)
 
 
 def dispatch(db: Session, user: User, order: Order, vehicle_number: str | None, transporter: str | None,

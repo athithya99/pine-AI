@@ -35,6 +35,10 @@ export function Settings() {
         fy_start_month: form.fy_start_month, order_prefix: form.order_prefix || null,
         quote_validity_hours: form.quote_validity_hours ? Number(form.quote_validity_hours) : null,
         ai_ordering_enabled: form.ai_ordering_enabled, ai_match_threshold: form.ai_match_threshold || null,
+        invoice_prefix: form.invoice_prefix || null, credit_note_prefix: form.credit_note_prefix || null,
+        invoice_auto_send: form.invoice_auto_send,
+        campaign_message_rate: form.campaign_message_rate === '' ? null : form.campaign_message_rate,
+        wa_daily_limit: form.wa_daily_limit ? Number(form.wa_daily_limit) : null,
       })
       toast('Company details saved'); reload()
     } catch (e) { setError(errorMessage(e)) } finally { setBusy(false) }
@@ -79,6 +83,19 @@ export function Settings() {
             </Field>
           </fieldset>
 
+          <fieldset disabled={!manager} className="mt-5 grid grid-cols-2 gap-3 border-t border-slate-200 pt-4">
+            <h2 className="col-span-2 font-medium">Invoices</h2>
+            <Field label="Invoice number prefix" hint={`Numbered ${(form.invoice_prefix || 'INV').toUpperCase()}/26-27/0001 (max 16 characters, GST rule)`}>
+              <input className="input uppercase" maxLength={5} value={v('invoice_prefix')} onChange={(e) => set('invoice_prefix', e.target.value)} />
+            </Field>
+            <Field label="Credit note prefix"><input className="input uppercase" maxLength={5} value={v('credit_note_prefix')} onChange={(e) => set('credit_note_prefix', e.target.value)} /></Field>
+            <label className="col-span-2 flex items-start gap-2 text-sm">
+              <input type="checkbox" className="mt-0.5" checked={Boolean(form.invoice_auto_send)}
+                onChange={(e) => setForm((f) => ({ ...f, invoice_auto_send: e.target.checked }))} />
+              <span>Send the invoice PDF to the buyer on WhatsApp as soon as it's saved.</span>
+            </label>
+          </fieldset>
+
           <fieldset disabled={!manager} className="mt-5 border-t border-slate-200 pt-4">
             <h2 className="font-medium">AI ordering on WhatsApp</h2>
             <p className="mt-0.5 text-xs text-slate-500">
@@ -94,6 +111,15 @@ export function Settings() {
               hint="Items the AI is less sure about are asked back to the buyer instead of being added. Default 0.80.">
               <input className="input" type="number" min={0.5} max={0.99} step={0.01} value={v('ai_match_threshold')}
                 onChange={(e) => set('ai_match_threshold', e.target.value)} />
+            </Field>
+          </fieldset>
+          <fieldset disabled={!manager} className="mt-5 grid grid-cols-2 gap-3 border-t border-slate-200 pt-4">
+            <h2 className="col-span-2 font-medium">Campaigns</h2>
+            <Field label="Meta charge per marketing message (₹)" hint="Used for the cost estimate shown before a campaign is sent. Check your Meta billing for the current India rate.">
+              <input className="input" type="number" min={0} step={0.0001} value={v('campaign_message_rate')} onChange={(e) => set('campaign_message_rate', e.target.value)} />
+            </Field>
+            <Field label="WhatsApp messaging limit (buyers per 24 hours)" hint="Your number's tier in WhatsApp Manager: 250, 1,000, 10,000, 100,000 or unlimited. Campaigns never send more than this.">
+              <input className="input" type="number" min={1} value={v('wa_daily_limit')} onChange={(e) => set('wa_daily_limit', Number(e.target.value))} />
             </Field>
           </fieldset>
           {manager && <div className="mt-4 flex justify-end"><button className="btn-primary" disabled={busy} onClick={save}>Save</button></div>}

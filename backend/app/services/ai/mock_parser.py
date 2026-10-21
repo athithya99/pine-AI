@@ -35,7 +35,22 @@ STATUS_RX = re.compile(
     re.IGNORECASE,
 )
 PRICE_RX = re.compile(r"\b(price|rate|rates|cost|evlo|evvalavu|kitna|kitne|how\s+much|mrp)\b", re.IGNORECASE)
-LEDGER_RX = re.compile(r"\b(ledger|statement|outstanding|balance|account\s+copy|dues?)\b", re.IGNORECASE)
+INVOICE_RX = re.compile(r"\b(invoice|bill)\b", re.IGNORECASE)
+INVOICE_REF_RX = re.compile(r"\b(?:invoice|bill)\s*(?:no\.?|number|#)?\s*[:\-]?\s*([A-Za-z]*[/\-]?\d[\w/\-]*)", re.I)
+COPY_RX = re.compile(r"\b(copy|send|share|pdf|anuppunga|bhejo|venum|need|want)\b", re.IGNORECASE)
+LEDGER_RX = re.compile(r"\b(ledger|statement|account\s+copy|soa)\b", re.IGNORECASE)
+OUTSTANDING_RX = re.compile(
+    r"\b(outstanding|balance|dues?|due\s+amount|pending\s+amount|how\s+much\s+(do\s+)?i\s+owe|owe|baaki|baki|bakaya"
+    r"|nilluvai|niluvai|pending\s+evlo|evlo\s+pending)\b|நிலுவை|பாக்கி|बकाया|बाकी", re.IGNORECASE)
+# "Kumar Stores' outstanding", "balance of Kumar Stores", "dues for Ravi Traders" (not my / our)
+OTHER_PARTY_RX = re.compile(
+    r"(\b[a-z][\w&.]*(?:\s+[a-z][\w&.]*){0,3}(?:'s|s')\s+(?:outstanding|balance|dues?|orders?|invoices?|ledger))"
+    r"|(?:outstanding|balance|dues?|orders?|invoices?|ledger|statement)\s+(?:of|for)\s+(?!my\b|me\b|our\b|us\b|mine\b"
+    r"|this\b|last\b|the\b|today\b|this\s+month\b|[a-z]+\s+month\b|\d)([a-z][\w&.]*)", re.IGNORECASE)
+HUMAN_RX = re.compile(
+    r"\b(talk|speak|connect)\s+(to|with)\s+(a\s+|some\s*one|any\s*one|the\s+)?(person|human|someone|somebody|agent|"
+    r"executive|manager|staff|team|salesman|sales\s*man|owner)|\b(call\s+me|call\s+back|customer\s+care|real\s+person|"
+    r"human|agent)\b|pesanum|baat\s+karni|baat\s+karo", re.IGNORECASE)
 PAYMENT_RX = re.compile(r"\b(paid|payment|utr|neft|imps|upi|transferred|gpay|phonepe|cheque)\b", re.IGNORECASE)
 COMPLAINT_RX = re.compile(r"\b(damaged?|broken|wrong|missing|leak(ing|ed)?|complaint|expired|short)\b", re.IGNORECASE)
 GREETING_RX = re.compile(r"^\s*(hi+|hello|hey|vanakkam|namaste|namaskar|good\s+(morning|evening|afternoon))\W*\s*$",
@@ -45,6 +60,8 @@ REMOVE_NAME_RX = re.compile(r"^\s*(remove|delete|drop|hatao)\s+(.+?)\s*$", re.I)
 SET_RX = re.compile(r"^\s*(make|change|set|update)\s+(item\s*#?(\d+)|(.+?))\s+(to\s+|as\s+|=\s*)?([\d.]+|\w+)\s*\w*\s*$",
                     re.I)
 ADD_RX = re.compile(r"^\s*(add|also|plus)\s+(.+)$", re.I)
+QUESTION_RX = re.compile(r"\?\s*$|^\s*(do|does|did|can|could|what|when|where|which|who|how|why|is|are|will|would)\b",
+                         re.IGNORECASE)
 NUM_RX = re.compile(r"(?<![\w.])(\d+(?:\.\d+)?)\s*(?:x|nos?|pcs)?(?![\w.])", re.I)
 
 
@@ -97,14 +114,22 @@ def parse_line(seg: str) -> ExtractedLine | None:
     return ExtractedLine(text=text, quantity=qty, unit=unit)
 
 
+def lines_have_qty(lines: list[ExtractedLine]) -> bool:
+    return any(l.quantity is not None and not re.search(r"invoice|bill", l.text, re.I) for l in lines)
+
+
 def parse(text: str | None, has_open_quote: bool = False) -> Extraction:
     t = (text or "").strip()
     if not t:
         return Extraction(intent="other")
+    lang = detect_language(t)
     if GREETING_RX.match(t):
-        return Extraction(intent="greeting", language="en")
-    if STATUS_RX.search(t):
-        return Extraction(intent="order_status")
+        return Extraction(intent="greeting", language=lang)
+    other = bool(OTHER_PARTY_RX.search(t))
+    if HUMAN_RX.search(t):
+        return Extraction(intent="human", language=lang)
+    if STATUS_RX.search(t) or re.search(r"ஆர்டர்\s*எங்கே|ऑर्डर\s*कहाँ|मेरा\s*ऑर्डर", t):
+        return Extraction(intent="order_status", language=lang, other_party=other)
 
     if has_open_quote:
         changes: list[Change] = []
@@ -128,13 +153,31 @@ def parse(text: str | None, has_open_quote: bool = False) -> Extraction:
     lines = [l for l in (parse_line(s) for s in _segments(PRICE_RX.sub(" ", t) if PRICE_RX.search(t) else t)) if l]
     if PRICE_RX.search(t):
         return Extraction(intent="price_enquiry", lines=lines)
+    if INVOICE_RX.search(t) and (COPY_RX.search(t) or INVOICE_REF_RX.search(t)) and not lines_have_qty(lines):
+        m = INVOICE_REF_RX.search(t)
+        return Extraction(intent="invoice_copy", reference=m.group(1) if m else None)
     if LEDGER_RX.search(t):
-        return Extraction(intent="ledger")
+        return Extraction(intent="ledger", language=lang, other_party=other)
+    if OUTSTANDING_RX.search(t) and not lines_have_qty(lines):
+        return Extraction(intent="outstanding", language=lang, other_party=other)
     if PAYMENT_RX.search(t):
         return Extraction(intent="payment")
     if COMPLAINT_RX.search(t):
-        return Extraction(intent="complaint")
+        return Extraction(intent="complaint", language=lang)
     with_qty = [l for l in lines if l.quantity is not None]
+    # "do you deliver...?" - "do" is also Hindi for 2: a question with no digits is not an order
+    if with_qty and QUESTION_RX.search(t) and not re.search(r"\d", t):
+        with_qty = []
     if with_qty:
-        return Extraction(intent="order", lines=lines)
-    return Extraction(intent="other")
+        return Extraction(intent="order", lines=lines, language=lang)
+    return Extraction(intent="other", language=lang)
+
+
+def detect_language(text: str | None) -> str:
+    """ta = Tamil script, hi = Devanagari, else en (romanised Tanglish/Hinglish get English replies)."""
+    t = text or ""
+    if re.search(r"[\u0B80-\u0BFF]", t):
+        return "ta"
+    if re.search(r"[\u0900-\u097F]", t):
+        return "hi"
+    return "en"

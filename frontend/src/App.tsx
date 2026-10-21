@@ -3,13 +3,21 @@ import { Layout, RequireManager } from './components/Layout'
 import { ToastProvider } from './components/ui'
 import { AuthProvider, useAuth } from './lib/auth'
 import { AiUsage } from './pages/AiUsage'
+import { Assistant } from './pages/Assistant'
+import { FaqPage } from './pages/Faq'
+import { CampaignDetail, CampaignForm, Campaigns } from './pages/Campaigns'
+import { Collections } from './pages/Collections'
 import { Customers } from './pages/Customers'
 import { Dashboard } from './pages/Dashboard'
 import { Inbox } from './pages/Inbox'
+import { InvoiceDetail } from './pages/InvoiceDetail'
+import { Invoices } from './pages/Invoices'
+import { Ledger, Receivables } from './pages/Ledger'
 import { Login } from './pages/Login'
 import { OrderDetail } from './pages/OrderDetail'
 import { OrderForm } from './pages/OrderForm'
 import { Orders } from './pages/Orders'
+import { PayPage, PaymentSettings } from './pages/PaymentSettings'
 import { PriceLists } from './pages/PriceLists'
 import { Products } from './pages/Products'
 import { Schemes } from './pages/Schemes'
@@ -32,14 +40,27 @@ export default function App() {
         <ToastProvider>
           <Routes>
             <Route path="/login" element={<Login />} />
+            <Route path="/pay/:id" element={<PayPage />} />
             <Route element={<Protected />}>
               <Route index element={<Dashboard />} />
               <Route path="inbox" element={<Inbox />} />
+              <Route path="assistant" element={<Assistant />} />
+              <Route path="faq" element={<RequireManager><FaqPage /></RequireManager>} />
               <Route path="orders" element={<Orders />} />
               <Route path="orders/new" element={<OrderForm />} />
               <Route path="orders/:id" element={<OrderDetail />} />
               <Route path="orders/:id/edit" element={<OrderForm />} />
               <Route path="customers" element={<Customers />} />
+              <Route path="customers/:id/ledger" element={<Ledger />} />
+              <Route path="campaigns" element={<RequireManager><Campaigns /></RequireManager>} />
+              <Route path="campaigns/new" element={<RequireManager><CampaignForm /></RequireManager>} />
+              <Route path="campaigns/:id" element={<RequireManager><CampaignDetail /></RequireManager>} />
+              <Route path="campaigns/:id/edit" element={<RequireManager><CampaignForm /></RequireManager>} />
+              <Route path="invoices" element={<Invoices />} />
+              <Route path="invoices/:id" element={<InvoiceDetail />} />
+              <Route path="receivables" element={<Receivables />} />
+              <Route path="collections" element={<Collections />} />
+              <Route path="payment-settings" element={<PaymentSettings />} />
               <Route path="products" element={<Products />} />
               <Route path="price-lists" element={<PriceLists />} />
               <Route path="schemes" element={<Schemes />} />

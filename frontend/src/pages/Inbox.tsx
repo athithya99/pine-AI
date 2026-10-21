@@ -216,6 +216,7 @@ export function Inbox() {
   const [convs, setConvs] = useState<Conversation[]>([])
   const [q, setQ] = useState('')
   const [unreadOnly, setUnreadOnly] = useState(false)
+  const [attentionOnly, setAttentionOnly] = useState(false)
   const [current, setCurrent] = useState<Conversation | null>(null)
   const [msgs, setMsgs] = useState<ChatMessage[]>([])
   const [templates, setTemplates] = useState<WaTemplate[]>([])
@@ -230,10 +231,10 @@ export function Inbox() {
 
   const loadConvs = useCallback(async () => {
     const { data } = await api.get<Page<Conversation>>('/inbox/conversations', {
-      params: { q: q || undefined, unread: unreadOnly || undefined, size: 100 },
+      params: { q: q || undefined, unread: unreadOnly || undefined, attention: attentionOnly || undefined, size: 100 },
     })
     setConvs(data.items)
-  }, [q, unreadOnly])
+  }, [q, unreadOnly, attentionOnly])
 
   const loadThread = useCallback(async () => {
     if (!selectedId) return
@@ -292,6 +293,13 @@ export function Inbox() {
     toast(data.bot_enabled ? 'Bot switched on for this chat' : 'You have taken over this chat')
   }
 
+  const resolve = async () => {
+    if (!current) return
+    const { data } = await api.patch<Conversation>(`/inbox/conversations/${current.id}`, { bot_enabled: current.bot_enabled, resolved: true })
+    setCurrent(data)
+    toast('Marked as handled')
+  }
+
   const retry = async (m: ChatMessage) => {
     try { await api.post(`/inbox/messages/${m.id}/retry`); refresh() } catch (e) { toast(errorMessage(e), 'error') }
   }
@@ -301,7 +309,7 @@ export function Inbox() {
     const p = last?.payload
     if (p?.interactive?.type === 'button') return p.interactive.action.buttons.map((b: any) => b.reply)
     if (p?.interactive?.type === 'list') return p.interactive.action.sections.flatMap((s: any) => s.rows).map((r: any) => ({ id: r.id, title: r.title }))
-    if (last?.msg_type === 'template') return (p?._buttons ?? []).map((b: any) => ({ id: b.text, title: b.text }))
+    if (last?.msg_type === 'template') return (p?._buttons ?? []).map((b: any) => ({ id: b.payload ?? b.text, title: b.text }))
     return []
   }, [msgs])
 
@@ -327,9 +335,14 @@ export function Inbox() {
             {simulator && <button className="btn-secondary px-2.5 py-1 text-xs" onClick={() => setSimOpen(true)}>Simulate buyer</button>}
           </div>
           <input className="input" placeholder="Search name or number" value={q} onChange={(e) => setQ(e.target.value)} />
-          <label className="mt-2 flex items-center gap-2 text-xs text-slate-600">
-            <input type="checkbox" checked={unreadOnly} onChange={(e) => setUnreadOnly(e.target.checked)} /> Unread only
-          </label>
+          <div className="mt-2 flex gap-4">
+            <label className="flex items-center gap-2 text-xs text-slate-600">
+              <input type="checkbox" checked={unreadOnly} onChange={(e) => setUnreadOnly(e.target.checked)} /> Unread only
+            </label>
+            <label className="flex items-center gap-2 text-xs text-slate-600" title="Chats the bot handed over: buyer asked for a person, a complaint, or a question it couldn't answer">
+              <input type="checkbox" checked={attentionOnly} onChange={(e) => setAttentionOnly(e.target.checked)} /> Needs a person
+            </label>
+          </div>
         </div>
         <div className="flex-1 overflow-y-auto">
           {convs.map((c) => (
@@ -348,6 +361,7 @@ export function Inbox() {
                   {c.unread_count > 0 && <span className="badge bg-pine-600 text-white">{c.unread_count}</span>}
                 </div>
                 {c.customer_status === 'lead' && <span className="badge mt-1 bg-amber-50 text-amber-700">New lead</span>}
+                {c.handover_at && <span className="badge mt-1 bg-amber-100 text-amber-800" title={c.handover_reason ?? ''}>Needs a person</span>}
               </div>
             </button>
           ))}
@@ -378,6 +392,12 @@ export function Inbox() {
               )}
               {simulator && <button className="btn-secondary px-2.5 py-1 text-xs" onClick={() => setSimOpen(true)}>Reply as buyer</button>}
             </div>
+            {current.handover_at && (
+              <div className="flex flex-wrap items-center gap-2 border-b border-amber-200 bg-amber-50 px-4 py-2 text-sm text-amber-900">
+                <span className="flex-1">Bot handed this chat to your team: {current.handover_reason}. It stays off until you switch it back on.</span>
+                {canSend && <button className="btn-secondary px-2.5 py-1 text-xs" onClick={resolve}>Mark handled</button>}
+              </div>
+            )}
 
             <div className="flex-1 space-y-2 overflow-y-auto px-3 py-4 md:px-8">
               {msgs.map((m) => <Bubble key={m.id} m={m} onRetry={() => retry(m)} />)}

@@ -1,6 +1,7 @@
 """Celery app. In development and tests CELERY_EAGER=true runs tasks inline, so Redis and a worker are optional."""
 
 from celery import Celery
+from celery.schedules import crontab
 
 from app.core.config import settings
 
@@ -15,6 +16,11 @@ celery_app.conf.update(
     task_ignore_result=True,
     beat_schedule={
         "expire-quotes": {"task": "orders.expire_quotes", "schedule": 600.0},
+        "campaigns": {"task": "campaigns.dispatch", "schedule": 60.0},
+        "daily-summary": {"task": "assistant.daily_summaries", "schedule": 60.0},
+        "owner-rules": {"task": "assistant.rules", "schedule": 300.0},
+        "payment-reminders": {"task": "collections.reminders",
+                              "schedule": crontab(hour=settings.REMINDER_HOUR_IST, minute=0)},
     },
 )
 

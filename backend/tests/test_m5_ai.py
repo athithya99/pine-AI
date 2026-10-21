@@ -145,11 +145,13 @@ def test_status_and_price_enquiry(shop, db):
     assert "couldn't find any recent orders" in last_reply(db, shop["customer"]["id"]).text
 
 
-def test_other_intents_left_for_staff(shop, db):
-    before = last_reply(db, shop["customer"]["id"]).id
-    say(shop, "paid 5000 by gpay today")
-    assert last_reply(db, shop["customer"]["id"]).id == before
-    assert db.scalars(select(AiLog).where(AiLog.intent == "payment")).first() is not None
+def test_complaint_handed_to_staff(shop, db):
+    """M10 (FR-M10-05): complaints go to a person; the bot says so once and steps back."""
+    say(shop, "goods came damaged yesterday")
+    assert "passed it to our team" in last_reply(db, shop["customer"]["id"]).text
+    assert db.scalars(select(AiLog).where(AiLog.intent == "complaint")).first() is not None
+    conv = shop["client"].get(f"{API}/inbox/conversations", headers=shop["h"]).json()["items"][0]
+    assert conv["handover_reason"] == "Complaint" and conv["bot_enabled"] is False
 
 
 def test_ai_failure_acknowledges_once_and_keeps_message(shop, db, monkeypatch):

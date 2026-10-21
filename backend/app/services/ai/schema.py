@@ -9,10 +9,11 @@ from typing import Literal
 from pydantic import BaseModel, Field, field_validator
 
 Intent = Literal[
-    "order", "order_change", "order_status", "price_enquiry", "ledger", "payment", "complaint", "greeting", "other"
+    "order", "order_change", "order_status", "price_enquiry", "outstanding", "ledger", "invoice_copy", "payment",
+    "complaint", "human", "greeting", "other"
 ]
-INTENTS = ["order", "order_change", "order_status", "price_enquiry", "ledger", "payment", "complaint", "greeting",
-           "other"]
+INTENTS = ["order", "order_change", "order_status", "price_enquiry", "outstanding", "ledger", "invoice_copy",
+           "payment", "complaint", "human", "greeting", "other"]
 
 
 class ExtractedLine(BaseModel):
@@ -54,6 +55,13 @@ class Extraction(BaseModel):
     language: str | None = None
     lines: list[ExtractedLine] = []
     changes: list[Change] = []
+    reference: str | None = None  # invoice number for invoice_copy
+    other_party: bool = False     # asks about someone else's account (M10: refused)
+
+    @field_validator("other_party", mode="before")
+    @classmethod
+    def _bool(cls, v):
+        return bool(v)
 
     @field_validator("intent", mode="before")
     @classmethod
@@ -66,6 +74,9 @@ JSON_SCHEMA: dict = {
     "properties": {
         "intent": {"type": "string", "enum": INTENTS},
         "language": {"type": "string", "description": "Language of the message, e.g. en, ta, hi, tanglish"},
+        "reference": {"type": ["string", "null"], "description": "Invoice number the buyer asks for, if any"},
+        "other_party": {"type": "boolean",
+                        "description": "true if the buyer asks about another business's orders, dues or invoices"},
         "lines": {
             "type": "array",
             "items": {
@@ -95,7 +106,7 @@ JSON_SCHEMA: dict = {
             },
         },
     },
-    "required": ["intent", "language", "lines", "changes"],
+    "required": ["intent", "language", "lines", "changes", "other_party"],
 }
 
 SYSTEM_PROMPT = """You read WhatsApp messages that shop owners in India send to their supplier, and turn them into data.
@@ -108,9 +119,12 @@ Decide the intent:
 - order_change: the buyer changes the open quote shown below ("make salt 30", "remove item 2", "add 5 soap")
 - order_status: asks where their order is / delivery status
 - price_enquiry: asks the rate or price of items, without ordering
-- ledger: asks for statement, ledger, outstanding or balance
+- outstanding: asks how much they owe, their balance, or which invoices are due
+- ledger: asks for a statement / ledger / account copy document (keep any month they mention in the text)
+- invoice_copy: asks for a copy of an invoice or bill; put the invoice number in "reference" if given
 - payment: says they paid, or sends payment proof / UTR
 - complaint: damaged, wrong or missing goods, delays
+- human: wants to talk to a person, asks for a call back or for the salesman / manager
 - greeting: only a greeting like hi / vanakkam / namaste
 - other: anything else
 
@@ -119,7 +133,10 @@ quantity as a number (null if not given), unit (bag, box, kg, pcs...) if given.
 If you are sure which catalog product it is, set "sku" to its SKU and "confidence" between 0 and 1 for how sure you
 are. If two products could fit, leave sku null. Never invent SKUs that are not in the catalog.
 For order_change, describe each change in "changes": item_number refers to the numbered lines of the open quote.
-Never include prices; the system calculates them."""
+Never include prices; the system calculates them.
+Set "other_party" to true when the buyer asks about another shop's or person's orders, dues or invoices
+(e.g. "what is Kumar Stores' outstanding?"). Their own account is never other_party.
+"language": en, ta (Tamil script), hi (Devanagari), tanglish or hinglish."""
 
 
 def build_context(catalog: list[str], open_quote: list[str] | None) -> str:

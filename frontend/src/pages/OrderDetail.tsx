@@ -59,6 +59,7 @@ export function OrderDetail() {
   // dialog fields
   const [remark, setRemark] = useState('')
   const [invoiceNo, setInvoiceNo] = useState('')
+  const [invMode, setInvMode] = useState<'generate' | 'erp'>('generate')
   const [invoiceDate, setInvoiceDate] = useState('')
   const [invQty, setInvQty] = useState<Record<string, string>>({})
   const [vehicle, setVehicle] = useState('')
@@ -91,7 +92,7 @@ export function OrderDetail() {
   const openDialog = (d: Dialog) => {
     setDlgError(null); setRemark('')
     if (d === 'invoice' && order) {
-      setInvoiceNo(''); setInvoiceDate(new Date().toISOString().slice(0, 10))
+      setInvoiceNo(''); setInvMode('generate'); setInvoiceDate(new Date().toISOString().slice(0, 10))
       setInvQty(Object.fromEntries(order.lines.map((l) => [l.id, String(Number(l.quantity))])))
     }
     if (d === 'dispatch') { setVehicle(''); setTransporter(''); setLr('') }
@@ -136,7 +137,7 @@ export function OrderDetail() {
             onClick={() => run('confirm', {}, 'Order confirmed')}>Confirm (buyer agreed)</button>}
           {can('reject') && <button className="btn-danger" onClick={() => openDialog('reject')}>Reject</button>}
           {can('approve') && <button className="btn-primary" onClick={() => order.status === 'on_hold' ? openDialog('approve') : run('approve', {}, 'Order approved')}>Approve</button>}
-          {can('invoice') && <button className="btn-primary" onClick={() => openDialog('invoice')}>Mark invoiced</button>}
+          {can('invoice') && <button className="btn-primary" onClick={() => openDialog('invoice')}>Create invoice</button>}
           {can('dispatch') && <button className="btn-primary" onClick={() => openDialog('dispatch')}>Mark dispatched</button>}
           {can('deliver') && <button className="btn-primary" disabled={busy} onClick={() => run('deliver', {}, 'Marked delivered')}>Mark delivered</button>}
         </>}
@@ -285,7 +286,8 @@ export function OrderDetail() {
           {(order.invoice_number || order.dispatched_at || order.approval_remark || order.notes) && (
             <div className="card space-y-2 p-4 text-sm">
               {order.approval_remark && <div><div className="text-xs text-slate-500">Approval remark</div>{order.approval_remark}</div>}
-              {order.invoice_number && <div><div className="text-xs text-slate-500">Invoice</div>{order.invoice_number} · {order.invoice_date}</div>}
+              {order.invoice_number && <div><div className="text-xs text-slate-500">Invoice</div>
+                {order.invoice_id ? <Link to={`/invoices/${order.invoice_id}`} className="font-medium text-pine-700 underline">{order.invoice_number}</Link> : order.invoice_number} · {order.invoice_date}</div>}
               {order.dispatched_at && <div><div className="text-xs text-slate-500">Dispatch</div>
                 {[order.vehicle_number, order.transporter, order.lr_number && `LR ${order.lr_number}`].filter(Boolean).join(' · ') || fmtDate(order.dispatched_at, true)}</div>}
               {order.notes && <div><div className="text-xs text-slate-500">Notes</div>{order.notes}</div>}
@@ -295,16 +297,16 @@ export function OrderDetail() {
       </div>
 
       <Drawer open={dialog !== null} onClose={() => setDialog(null)}
-        title={{ approve: 'Approve order on hold', reject: 'Reject order', cancel: 'Cancel order', invoice: 'Mark as invoiced', dispatch: 'Mark as dispatched' }[dialog ?? 'approve']}
+        title={{ approve: 'Approve order on hold', reject: 'Reject order', cancel: 'Cancel order', invoice: 'Create invoice', dispatch: 'Mark as dispatched' }[dialog ?? 'approve']}
         footer={<>
           <button className="btn-secondary" onClick={() => setDialog(null)}>Close</button>
           {dialog === 'approve' && <button className="btn-primary" disabled={busy || !remark.trim()} onClick={() => run('approve', { remark }, 'Order approved')}>Approve</button>}
           {dialog === 'reject' && <button className="btn-danger" disabled={busy || !remark.trim()} onClick={() => run('reject', { remark }, 'Order rejected')}>Reject order</button>}
           {dialog === 'cancel' && <button className="btn-danger" disabled={busy || remark.trim().length < 2} onClick={() => run('cancel', { reason: remark }, 'Order cancelled')}>Cancel order</button>}
-          {dialog === 'invoice' && <button className="btn-primary" disabled={busy || !invoiceNo.trim()} onClick={() => run('invoice', {
-            invoice_number: invoiceNo, invoice_date: invoiceDate || null,
+          {dialog === 'invoice' && <button className="btn-primary" disabled={busy || (invMode === 'erp' && !invoiceNo.trim())} onClick={() => run('invoice', {
+            mode: invMode, invoice_number: invMode === 'erp' ? invoiceNo : null, invoice_date: invoiceDate || null,
             lines: Object.entries(invQty).map(([line_id, v]) => ({ line_id, invoiced_qty: v || '0' })),
-          }, 'Marked invoiced')}>Save</button>}
+          }, invMode === 'generate' ? 'Invoice created' : 'Invoice recorded')}>{invMode === 'generate' ? 'Create invoice' : 'Save'}</button>}
           {dialog === 'dispatch' && <button className="btn-primary" disabled={busy} onClick={() => run('dispatch', {
             vehicle_number: vehicle || null, transporter: transporter || null, lr_number: lr || null,
           }, 'Marked dispatched')}>Save</button>}
@@ -323,7 +325,18 @@ export function OrderDetail() {
         )}
         {dialog === 'invoice' && <div className="space-y-3">
           <div className="grid grid-cols-2 gap-3">
-            <Field label="Invoice number *"><input className="input" value={invoiceNo} onChange={(e) => setInvoiceNo(e.target.value)} autoFocus /></Field>
+            <div className="col-span-2 grid grid-cols-2 gap-2">
+              {([['generate', 'Generate GST invoice', 'We create the invoice and PDF and send it to the buyer'],
+                ['erp', 'Already billed in Tally/ERP', 'Just record that invoice number (attach its PDF later)']] as const).map(([k, t, d]) => (
+                <button key={k} type="button" onClick={() => setInvMode(k)}
+                  className={`rounded-lg border p-3 text-left text-sm ${invMode === k ? 'border-pine-500 bg-pine-50' : 'border-slate-200 hover:bg-slate-50'}`}>
+                  <div className="font-medium">{t}</div><div className="text-xs text-slate-500">{d}</div>
+                </button>
+              ))}
+            </div>
+            {invMode === 'erp'
+              ? <Field label="Invoice number *"><input className="input" value={invoiceNo} onChange={(e) => setInvoiceNo(e.target.value)} autoFocus /></Field>
+              : <Field label="Invoice number"><input className="input" value="Next number, e.g. INV/26-27/0001" disabled /></Field>}
             <Field label="Invoice date"><input className="input" type="date" value={invoiceDate} onChange={(e) => setInvoiceDate(e.target.value)} /></Field>
           </div>
           <p className="text-xs text-slate-500">If you're supplying less than ordered, lower the invoiced quantity. The gap is recorded as short supply and the buyer is told.</p>

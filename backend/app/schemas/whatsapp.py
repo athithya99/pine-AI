@@ -62,6 +62,7 @@ class TemplateIn(BaseModel):
     name: str
     language: str = Field(default="en", max_length=10)
     category: TemplateCategory
+    header_format: Literal["TEXT", "IMAGE", "DOCUMENT"] | None = None
     header_text: str | None = Field(default=None, max_length=60)
     body: str = Field(min_length=1, max_length=1024)
     footer: str | None = Field(default=None, max_length=60)
@@ -83,6 +84,12 @@ class TemplateIn(BaseModel):
             raise ValueError("Variables must be numbered {{1}}, {{2}}, ... without gaps")
         if self.example_values and len(self.example_values) != len(nums):
             raise ValueError(f"Give one example value for each of the {len(nums)} variable(s)")
+        if self.header_format in ("IMAGE", "DOCUMENT"):
+            self.header_text = None
+        elif self.header_text:
+            self.header_format = "TEXT"
+        else:
+            self.header_format = None
         return self
 
 
@@ -91,6 +98,7 @@ class TemplateOut(ORM):
     name: str
     language: str
     category: TemplateCategory
+    header_format: str | None = None
     header_text: str | None
     body: str
     footer: str | None
@@ -117,6 +125,8 @@ class ConversationOut(BaseModel):
     last_message_preview: str | None
     window_open: bool
     window_closes_at: datetime | None
+    handover_at: datetime | None = None
+    handover_reason: str | None = None
 
 
 class MessageOut(ORM):
@@ -173,6 +183,7 @@ class SendIn(BaseModel):
 
 class ConversationPatch(BaseModel):
     bot_enabled: bool
+    resolved: bool = False  # clear the "needs a person" flag without switching the bot back on
 
 
 # ---------- simulator ----------

@@ -51,6 +51,14 @@ class Settings(BaseSettings):
     STT_API_KEY: str = ""              # blank = reuse AI_API_KEY when AI_PROVIDER=openai
     STT_MODEL: str = "gpt-4o-mini-transcribe"
 
+    # Collections (M8)
+    PUBLIC_APP_URL: str = "http://localhost:5173"   # used in simulator payment links
+    RAZORPAY_API_URL: str = "https://api.razorpay.com/v1"
+    REMINDER_HOUR_IST: int = 10                     # daily payment reminders run at this hour
+
+    # Campaigns (M9): max messages queued per campaign per run (runs every minute)
+    CAMPAIGN_BATCH_SIZE: int = 500
+
     # run Celery tasks inline (no Redis/worker needed) - dev and tests
     CELERY_EAGER: bool = True
 

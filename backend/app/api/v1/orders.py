@@ -424,8 +424,19 @@ def cancel(order_id: uuid.UUID, body: CancelIn, db: Session = Depends(get_db), u
 @router.post("/{order_id}/invoice", response_model=OrderDetail)
 def mark_invoiced(order_id: uuid.UUID, body: InvoiceIn, db: Session = Depends(get_db),
                   user: User = Depends(invoicers)):
+    """Create the order's invoice (M7): generate our GST invoice, or record the ERP invoice number."""
+    from app.services import invoices as inv_svc
+
+    mode = body.mode or ("erp" if body.invoice_number else "generate")
     qty = {l.line_id: l.invoiced_qty for l in body.lines}
-    return _act(db, user, order_id, lambda o: svc.mark_invoiced(db, user, o, body.invoice_number, body.invoice_date, qty))
+
+    def run(o: Order):
+        try:
+            inv_svc.create_from_order(db, user, o, mode=mode, number=body.invoice_number,
+                                      invoice_date=body.invoice_date, invoiced=qty, notes=body.notes)
+        except inv_svc.InvoiceError as exc:
+            raise OrderError(exc.message, exc.code, exc.http) from None
+    return _act(db, user, order_id, run)
 
 
 @router.post("/{order_id}/dispatch", response_model=OrderDetail)

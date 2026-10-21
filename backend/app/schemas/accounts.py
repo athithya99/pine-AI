@@ -99,6 +99,32 @@ class TenantUpdate(BaseModel):
     quote_validity_hours: int | None = Field(default=None, ge=1, le=168)
     ai_ordering_enabled: bool | None = None
     ai_match_threshold: Decimal | None = Field(default=None, ge=Decimal("0.50"), le=Decimal("0.99"))
+    # invoice numbers are at most 16 characters (GST rule): PREFIX/26-27/0001
+    invoice_prefix: str | None = Field(default=None, pattern=r"^[A-Za-z0-9-]{1,5}$")
+    credit_note_prefix: str | None = Field(default=None, pattern=r"^[A-Za-z0-9-]{1,5}$")
+    invoice_auto_send: bool | None = None
+    reminders_enabled: bool | None = None
+    reminder_offsets: list[int] | None = Field(default=None, max_length=8)
+    receipt_prefix: str | None = Field(default=None, pattern=r"^[A-Za-z0-9-]{1,5}$")
+    campaign_message_rate: Decimal | None = Field(default=None, ge=0, le=100)
+    wa_daily_limit: int | None = Field(default=None, ge=1, le=10_000_000)
+    daily_summary_enabled: bool | None = None
+    daily_summary_time: str | None = Field(default=None, pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
+    daily_summary_to: str | None = None
+
+    @field_validator("reminder_offsets")
+    @classmethod
+    def _offsets(cls, v: list[int] | None) -> list[int] | None:
+        if v is None:
+            return None
+        if any(d < -30 or d > 180 for d in v):
+            raise ValueError("Reminder days must be between 30 days before and 180 days after the due date")
+        return sorted(set(v))
+
+    @field_validator("invoice_prefix", "credit_note_prefix", "receipt_prefix")
+    @classmethod
+    def _doc_prefix(cls, v: str | None) -> str | None:
+        return v.upper() if v else None
 
     @field_validator("order_prefix")
     @classmethod
@@ -110,7 +136,7 @@ class TenantUpdate(BaseModel):
     def _gstin(cls, v: str | None) -> str | None:
         return validate_gstin(v) if v else None
 
-    @field_validator("contact_phone")
+    @field_validator("contact_phone", "daily_summary_to")
     @classmethod
     def _phone(cls, v: str | None) -> str | None:
         return normalize_phone(v) if v else None
@@ -133,6 +159,17 @@ class TenantOut(ORM):
     quote_validity_hours: int
     ai_ordering_enabled: bool
     ai_match_threshold: Decimal
+    invoice_prefix: str
+    credit_note_prefix: str
+    invoice_auto_send: bool
+    reminders_enabled: bool
+    reminder_offsets: list[int]
+    receipt_prefix: str
+    campaign_message_rate: Decimal
+    wa_daily_limit: int
+    daily_summary_enabled: bool
+    daily_summary_time: str
+    daily_summary_to: str | None
     created_at: datetime
 
 

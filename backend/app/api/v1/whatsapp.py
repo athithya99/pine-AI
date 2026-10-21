@@ -21,6 +21,7 @@ from app.models import (
     MessageTemplate,
     Role,
     SenderKind,
+    TemplateCategory,
     TemplateStatus,
     User,
     WaMode,
@@ -155,7 +156,7 @@ def create_template(body: TemplateIn, db: Session = Depends(get_db), user: User 
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Connect a WhatsApp number first")
     tpl = MessageTemplate(
         tenant_id=user.tenant_id, name=body.name, language=body.language, category=body.category,
-        header_text=body.header_text, body=body.body, footer=body.footer,
+        header_format=body.header_format, header_text=body.header_text, body=body.body, footer=body.footer,
         buttons=[b.model_dump() for b in body.buttons] or None, example_values=body.example_values or None,
         variable_count=len(set(re.findall(r"\{\{(\d+)\}\}", body.body))),
     )
@@ -182,7 +183,16 @@ def sync_templates(db: Session = Depends(get_db), user: User = Depends(managers)
     except WhatsAppError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, exc.message) from None
     by_key = {(r.get("name"), r.get("language")): r for r in remote}
-    templates = db.scalars(select(MessageTemplate).where(MessageTemplate.tenant_id == user.tenant_id)).all()
+    templates = list(db.scalars(select(MessageTemplate).where(MessageTemplate.tenant_id == user.tenant_id)).all())
+    known = {(t.name, t.language) for t in templates}
+    for key, r in by_key.items():  # templates created directly in WhatsApp Manager
+        if key in known or r.get("category") not in TemplateCategory._value2member_map_ or not r.get("components"):
+            continue
+        tpl = MessageTemplate(tenant_id=user.tenant_id, name=r["name"], language=r.get("language") or "en",
+                              category=TemplateCategory(r["category"]), status=TemplateStatus.pending, body="")
+        _apply_components(tpl, r["components"])
+        db.add(tpl)
+        templates.append(tpl)
     for t in templates:
         r = by_key.get((t.name, t.language))
         if r and r.get("status") in TemplateStatus._value2member_map_:
@@ -190,8 +200,27 @@ def sync_templates(db: Session = Depends(get_db), user: User = Depends(managers)
             t.meta_template_id = r.get("id") or t.meta_template_id
             reason = r.get("rejected_reason")
             t.rejection_reason = reason if reason and reason != "NONE" else None
+            if r.get("components"):
+                _apply_components(t, r["components"])
     db.commit()
     return templates
+
+
+def _apply_components(tpl: MessageTemplate, components: list[dict]) -> None:
+    """Copy header / body / footer / quick-reply buttons from Meta's template definition."""
+    for c in components:
+        kind = (c.get("type") or "").upper()
+        if kind == "HEADER":
+            tpl.header_format = (c.get("format") or "TEXT").upper()
+            tpl.header_text = (c.get("text") or "")[:60] or None if tpl.header_format == "TEXT" else None
+        elif kind == "BODY":
+            tpl.body = c.get("text") or ""
+            tpl.variable_count = len(set(re.findall(r"\{\{(\d+)\}\}", tpl.body)))
+        elif kind == "FOOTER":
+            tpl.footer = (c.get("text") or "")[:60] or None
+        elif kind == "BUTTONS":
+            tpl.buttons = [{"type": "QUICK_REPLY", "text": b.get("text", "")} for b in c.get("buttons", [])
+                           if b.get("type") == "QUICK_REPLY"] or None
 
 
 # ========================= inbox =========================
@@ -210,6 +239,7 @@ def _conv_out(conv: Conversation, c: Customer) -> ConversationOut:
         whatsapp_opt_in=c.whatsapp_opt_in, bot_enabled=conv.bot_enabled, unread_count=conv.unread_count,
         last_message_at=conv.last_message_at, last_message_preview=conv.last_message_preview,
         window_open=outbound.window_open(conv), window_closes_at=outbound.window_closes_at(conv),
+        handover_at=conv.handover_at, handover_reason=conv.handover_reason,
     )
 
 
@@ -224,6 +254,7 @@ def _get_conversation(db: Session, user: User, conv_id: uuid.UUID) -> tuple[Conv
 def list_conversations(
     q: str | None = None,
     unread: bool | None = None,
+    attention: bool | None = None,
     assigned_user_id: uuid.UUID | None = None,
     page: int = Query(default=1, ge=1),
     size: int = Query(default=30, ge=1, le=100),
@@ -235,11 +266,20 @@ def list_conversations(
         stmt = stmt.where(or_(Customer.business_name.ilike(f"%{q}%"), Customer.whatsapp_number.ilike(f"%{q}%")))
     if unread:
         stmt = stmt.where(Conversation.unread_count > 0)
+    if attention:
+        stmt = stmt.where(Conversation.handover_at.is_not(None))
     if assigned_user_id:
         stmt = stmt.where(Customer.assigned_user_id == assigned_user_id)
     total = db.scalar(select(func.count()).select_from(stmt.subquery()))
     rows = db.execute(stmt.order_by(Conversation.last_message_at.desc()).offset((page - 1) * size).limit(size)).all()
     return Page(items=[_conv_out(conv, c) for conv, c in rows], total=total, page=page, size=size)
+
+
+@router.get("/inbox/attention")
+def attention(db: Session = Depends(get_db), user: User = Depends(staff)):
+    """Chats the bot handed to staff (FR-M10-05), for the badge on the Inbox menu."""
+    stmt = _scoped_conversations(user).where(Conversation.handover_at.is_not(None))
+    return {"count": db.scalar(select(func.count()).select_from(stmt.subquery())) or 0}
 
 
 @router.post("/inbox/customers/{customer_id}/conversation", response_model=ConversationOut)
@@ -306,7 +346,8 @@ def _msg_out(m: Message) -> MessageOut:
 
 @router.post("/inbox/conversations/{conv_id}/messages", response_model=MessageOut, status_code=status.HTTP_201_CREATED)
 def send(conv_id: uuid.UUID, body: SendIn, db: Session = Depends(get_db), user: User = Depends(senders)):
-    _, customer = _get_conversation(db, user, conv_id)
+    conv, customer = _get_conversation(db, user, conv_id)
+    conv.handover_at = conv.handover_reason = None  # a person has answered
     if body.kind == "text":
         msg = _queue_and_send(db, outbound.queue_text, customer, body.text.strip(), user=user)
     elif body.kind == "buttons":
@@ -328,7 +369,8 @@ def send(conv_id: uuid.UUID, body: SendIn, db: Session = Depends(get_db), user: 
 @router.post("/inbox/conversations/{conv_id}/media", response_model=MessageOut, status_code=status.HTTP_201_CREATED)
 async def send_media(conv_id: uuid.UUID, file: UploadFile = File(...), caption: str | None = Form(default=None),
                      db: Session = Depends(get_db), user: User = Depends(senders)):
-    _, customer = _get_conversation(db, user, conv_id)
+    conv, customer = _get_conversation(db, user, conv_id)
+    conv.handover_at = conv.handover_reason = None
     content = await file.read()
     mime = file.content_type or "application/octet-stream"
     if mime not in ALLOWED_MEDIA:
@@ -345,6 +387,8 @@ def update_conversation(conv_id: uuid.UUID, body: ConversationPatch, db: Session
     """Human takeover: switch the bot off for this thread, or back on (FR-M4-09)."""
     conv, c = _get_conversation(db, user, conv_id)
     conv.bot_enabled = body.bot_enabled
+    if body.bot_enabled or body.resolved:
+        conv.handover_at = conv.handover_reason = None
     audit.record(db, user, "conversation", conv.id, "update", new={"bot_enabled": body.bot_enabled})
     db.commit()
     return _conv_out(conv, c)

@@ -63,3 +63,4 @@ class Customer(IdTimestampMixin, TenantMixin, Base):
     opt_in_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     opt_in_source: Mapped[str | None] = mapped_column(String(50))
     opted_out: Mapped[bool] = mapped_column(Boolean, default=False)
+    reminders_paused: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")  # FR-M8-10

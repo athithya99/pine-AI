@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
 from app.api import webhooks
-from app.api.v1 import ai, auth, catalog, customers, orders, tenants, users, whatsapp
+from app.api.v1 import ai, assistant, auth, campaigns, catalog, customers, invoices, orders, payments, tenants, users, whatsapp
 from app.core.config import settings
 from app.core.database import SessionLocal
 
@@ -27,7 +27,7 @@ app.add_middleware(
 )
 
 API = "/api/v1"
-for r in (auth.router, tenants.router, users.router, customers.router, catalog.router, orders.router, whatsapp.router, ai.router):
+for r in (auth.router, tenants.router, users.router, customers.router, catalog.router, orders.router, invoices.router, payments.router, whatsapp.router, ai.router, campaigns.router, assistant.router):
     app.include_router(r, prefix=API)
 app.include_router(webhooks.router)
 

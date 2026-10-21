@@ -39,6 +39,9 @@ def wa_number(e164: str) -> str:
 
 def template_components(tpl: MessageTemplate) -> list[dict]:
     comps: list[dict] = []
+    if tpl.header_format in ("IMAGE", "DOCUMENT"):
+        raise WhatsAppError("Templates with an image or PDF header must be created in WhatsApp Manager "
+                            "(Meta needs a sample file). Create it there, then press Sync here.")
     if tpl.header_text:
         comps.append({"type": "HEADER", "format": "TEXT", "text": tpl.header_text})
     body: dict[str, Any] = {"type": "BODY", "text": tpl.body}
@@ -117,7 +120,7 @@ class CloudClient:
             raise WhatsAppError("WhatsApp Business Account ID is missing")
         out: list[dict] = []
         url: str | None = f"{self.base}/{self.account.waba_id}/message_templates"
-        params: dict | None = {"fields": "id,name,language,status,category,rejected_reason", "limit": 100}
+        params: dict | None = {"fields": "id,name,language,status,category,rejected_reason,components", "limit": 100}
         while url:
             data = self._check(self.http.get(url, params=params))
             out.extend(data.get("data", []))

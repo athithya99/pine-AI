@@ -8,10 +8,11 @@ Business rules:
 """
 
 import logging
+import re
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.models import (
@@ -30,7 +31,10 @@ from app.models import (
 )
 from app.services import media
 from app.services import orders as svc
+from app.services.ai import faq as faq_svc
 from app.services.ai import matcher
+from app.services.ai.i18n import TEXTS, norm_lang, t
+from app.services.ai.mock_parser import detect_language
 from app.services.ai.providers import (
     IMAGE_TYPES,
     MAX_IMAGE_BYTES,
@@ -44,7 +48,9 @@ from app.services.pricing import PricingEngine
 
 log = logging.getLogger("pinesphere.ai")
 
-ACK = "Thanks! We've received your message. Our team will get back to you shortly."
+ACK = TEXTS["ack"]["en"]
+QUESTION_RX = re.compile(r"\?|^\s*(what|when|where|which|who|how|why|do|does|can|is|are|will|enna|eppo|enga|kya|kab|"
+                         r"kahan|kaise)\b", re.IGNORECASE)
 ACK_REPEAT_MINUTES = 30
 CATALOG_LIMIT = 500
 CHANGE_MATCH_MIN = 0.7
@@ -64,6 +70,8 @@ class Assistant:
         self.customer = db.get(Customer, msg.customer_id)
         self.threshold = float(self.tenant.ai_match_threshold or Decimal("0.80"))
         self._products: list[Product] | None = None
+        self._image: tuple[bytes, str] | None = None
+        self.lang = detect_language(msg.text)
 
     # ---------- helpers ----------
     @property
@@ -113,9 +121,27 @@ class Assistant:
         recent = self.db.scalar(
             select(Message).where(Message.conversation_id == self.conv.id, Message.direction == Direction.outbound)
             .order_by(Message.created_at.desc()).limit(1))
-        if recent and recent.text == ACK and recent.created_at > datetime.now(UTC) - timedelta(minutes=ACK_REPEAT_MINUTES):
+        if (recent and recent.text in TEXTS["ack"].values()
+                and recent.created_at > datetime.now(UTC) - timedelta(minutes=ACK_REPEAT_MINUTES)):
             return
-        self.reply(ACK)
+        self.reply(t("ack", self.lang))
+
+    def handover(self, reason: str, key: str = "handover") -> None:
+        """FR-M10-05: stop the bot for this chat and flag it for staff (Inbox shows it under "Needs a person")."""
+        self.conv.handover_at = datetime.now(UTC)
+        self.conv.handover_reason = reason[:200]
+        self.conv.bot_enabled = False
+        self.reply(t(key, self.lang))
+
+    def _mentions_other_customer(self) -> bool:
+        """Buyer named another customer of this seller ("Kumar Stores outstanding?")."""
+        text = (self.msg.text or "").strip().lower()
+        if len(text) < 4:
+            return False
+        name = func.lower(Customer.business_name)
+        return self.db.scalar(select(Customer.id).where(
+            Customer.tenant_id == self.tenant.id, Customer.id != self.customer.id, func.length(Customer.business_name) >= 4,
+            func.strpos(text, name) > 0).limit(1)) is not None
 
     # ---------- entry point ----------
     def run(self) -> None:
@@ -160,6 +186,7 @@ class Assistant:
                 if mime not in IMAGE_TYPES or len(data) > MAX_IMAGE_BYTES:
                     raise AIError("Photo format or size not supported (JPEG/PNG/WebP up to 5 MB)")
                 image = (data, mime)
+                self._image = image
 
             open_order = self._open_quote()
             result = provider.extract(text, self._context(open_order), image=image,
@@ -171,6 +198,8 @@ class Assistant:
             self.acknowledge()
             return
 
+        if result.extraction.language:
+            self.lang = norm_lang(result.extraction.language) if self.lang == "en" else self.lang
         row = self._log("extract", result.provider, result.model, intent=result.extraction.intent, input_text=text,
                         input_media=media_kind, output=result.raw, input_tokens=result.input_tokens,
                         output_tokens=result.output_tokens, cost=result.cost_usd, latency_ms=result.latency_ms)
@@ -179,7 +208,11 @@ class Assistant:
     # ---------- routing ----------
     def route(self, result: AIResult, open_order: Order | None, row: AiLog) -> None:
         ex = result.extraction
-        if ex.intent == "order_change" and open_order is not None and ex.changes:
+        about_others = ex.intent in ("order_status", "outstanding", "ledger", "invoice_copy") and (
+            ex.other_party or self._mentions_other_customer())
+        if about_others:  # buyers only ever see their own account (M10 safety rule)
+            self.reply(t("not_yours", self.lang))
+        elif ex.intent == "order_change" and open_order is not None and ex.changes:
             self.apply_changes(open_order, ex.changes, row)
         elif ex.intent in ("order", "order_change") and ex.lines:
             self.new_order(ex.lines, row)
@@ -187,15 +220,77 @@ class Assistant:
             self.reply(svc.status_reply(self.db, self.customer))
         elif ex.intent == "price_enquiry" and ex.lines:
             self.prices(ex.lines)
+        elif ex.intent == "outstanding":
+            self.outstanding()
+        elif ex.intent == "payment":
+            self.payment_proof()
+        elif ex.intent == "ledger":
+            self.send_statement()
+        elif ex.intent == "invoice_copy":
+            self.send_invoice_copy(ex.reference)
         elif ex.intent == "greeting":
-            name = self.customer.contact_person or ""
-            self.reply(
-                f"Hi{(' ' + name.split()[0]) if name else ''}! Send your order here, e.g. \"10 bags atta, 5 boxes soap\". "
-                "You can also send a photo of your list or a voice note. Ask \"where is my order?\" any time for status."
-            )
+            name = (self.customer.contact_person or "").split()
+            self.reply(t("greeting", self.lang, name=f" {name[0]}" if name else ""))
+        elif ex.intent == "human":
+            self.handover("Buyer asked to talk to a person")
+        elif ex.intent == "complaint":
+            self.handover("Complaint", "complaint")
         elif self.msg.msg_type in (MessageType.image, MessageType.audio):
             self.acknowledge()  # media we couldn't use: staff will look
-        # ledger, payment, complaint, other: left in the inbox for staff (M7/M8/M10 take these over later)
+        else:
+            self.general_question(row)
+
+    def general_question(self, row: AiLog) -> None:
+        """FR-M10-03 / 05: answer from the seller's FAQ, else hand over if it was a real question."""
+        text = self.msg.payload.get("transcript") if self.msg.payload and self.msg.payload.get("transcript") \
+            else self.msg.text
+        entry, res = faq_svc.find(self.db, self.tenant.id, text)
+        if res is not None:
+            self._log("faq", res.provider, res.model, input_text=text, output=res.data, input_tokens=res.input_tokens,
+                      output_tokens=res.output_tokens, cost=res.cost_usd, latency_ms=res.latency_ms)
+        if entry is not None:
+            entry.times_used = (entry.times_used or 0) + 1
+            row.output = {**(row.output or {}), "faq_id": str(entry.id)}
+            self.reply(faq_svc.answer_in(entry, self.lang))
+        elif text and (QUESTION_RX.search(text) or len(text.split()) >= 5):
+            self.handover("Question the bot couldn't answer")
+
+    def outstanding(self) -> None:
+        """FR-M10-02: this buyer's balance and unpaid invoices, straight from the ledger."""
+        from app.services import invoices as inv_svc
+        from app.services import payments as pay_svc
+
+        bal = inv_svc.balance(self.db, self.customer)
+        unpaid = pay_svc.unpaid_invoices(self.db, self.customer)
+        if bal < 0 and not unpaid:
+            self.reply(t("advance", self.lang, total=f"{-bal:,.2f}"))
+            return
+        if bal <= 0 and not unpaid:
+            self.reply(t("outstanding_none", self.lang))
+            return
+        today = inv_svc.today()
+        rows = []
+        for inv in unpaid[:8]:
+            due = inv.due_date or inv.invoice_date
+            flag = t("overdue", self.lang) if due < today else t("due_on", self.lang)
+            rows.append(f"• {inv.number}: ₹{pay_svc.balance_due(inv):,.2f} ({flag} {due:%d %b})")
+        more = f"\n…+{len(unpaid) - 8}" if len(unpaid) > 8 else ""
+        parts = [t("outstanding_head", self.lang, total=f"{max(bal, Decimal(0)):,.2f}")]
+        if rows:
+            parts.append(t("due_list", self.lang) + "\n" + "\n".join(rows) + more)
+        if bal > 0:
+            try:
+                from app.models import LinkStatus, PaymentLink
+
+                link = self.db.scalar(select(PaymentLink).where(
+                    PaymentLink.customer_id == self.customer.id, PaymentLink.status == LinkStatus.created,
+                    PaymentLink.amount == bal, PaymentLink.expires_at > datetime.now(UTC)).limit(1)) \
+                    or pay_svc.create_link(self.db, None, self.customer, amount=bal, purpose="reminder")
+                parts.append(t("pay_link", self.lang, url=link.short_url))
+            except pay_svc.PaymentError as exc:  # no gateway set up: answer without a link
+                log.info("No payment link in outstanding reply: %s", exc)
+        parts.append(t("statement_hint", self.lang))
+        self.reply("\n\n".join(parts))
 
     def _match(self, line: ExtractedLine):
         return matcher.best_match(line.text, self.products, line.sku, line.confidence)
@@ -327,6 +422,55 @@ class Assistant:
             rows.append(row)
         tail = f"\n\nTo order, reply with quantities, e.g. \"10 {first.name}\"." if first else ""
         self.reply("Your rates:\n" + "\n".join(rows) + tail)
+
+
+    def payment_proof(self) -> None:
+        """FR-M8-07: buyer says they paid / sends a screenshot -> proposal for Accounts to confirm."""
+        from app.services import payments as pay_svc
+        from app.services.ai.payment_reader import read_payment
+
+        try:
+            fields, res = read_payment(self.msg.text, self._image)
+        except AIError as exc:
+            self._log("payment_read", "mock", "-", input_text=self.msg.text, error=str(exc))
+            self.acknowledge()
+            return
+        safe = {k: (str(v) if v is not None else None) for k, v in fields.items()}
+        if res is not None:
+            self._log("payment_read", res.provider, res.model, intent="payment", input_text=self.msg.text,
+                      input_media=self._image[1] if self._image else None, output=safe,
+                      input_tokens=res.input_tokens, output_tokens=res.output_tokens, cost=res.cost_usd,
+                      latency_ms=res.latency_ms)
+        if not fields.get("amount") and not fields.get("reference"):
+            return  # nothing usable: staff handle it from the inbox
+        _, reply = pay_svc.propose_from_buyer(self.db, self.customer, self.msg.id, {**fields, "raw": safe})
+        self.reply(reply)
+
+    def send_statement(self) -> None:
+        """FR-M7-09: ledger PDF for the month asked for, else this financial year to date."""
+        from app.services import invoices as inv_svc
+
+        start, end, label = inv_svc.period_from_text(self.msg.text, self.tenant)
+        msg, note = inv_svc.send_statement(self.db, self.customer, start, end, label)
+        if msg is None:
+            log.info("Statement not sent: %s", note)
+
+    def send_invoice_copy(self, reference: str | None) -> None:
+        """FR-M7-11: copy of an invoice by number (or the latest one)."""
+        from app.services import invoices as inv_svc
+
+        inv = inv_svc.find_customer_invoice(self.db, self.customer, reference)
+        if inv is None:
+            self.reply(f"We couldn't find invoice {reference} for your account. Please check the number, "
+                       "or our team will help you shortly." if reference else
+                       "We couldn't find any invoices for your account yet.")
+            return
+        if not inv.pdf_path:
+            self.reply(f"Invoice {inv.number} dated {inv.invoice_date:%d %b %Y} for ₹{inv.total:,.2f}. "
+                       "Our team will share the PDF shortly.")
+            return
+        inv_svc.send_invoice(self.db, inv, f"Copy of invoice {inv.number} dated {inv.invoice_date:%d %b %Y} "
+                                           f"for ₹{inv.total:,.2f}.")
 
 
 def process_message(db: Session, msg: Message) -> None:

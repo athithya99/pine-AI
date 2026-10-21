@@ -45,9 +45,12 @@ class InvoiceLineIn(BaseModel):
 
 
 class InvoiceIn(BaseModel):
-    invoice_number: str = Field(min_length=1, max_length=40)
+    # generate = make our GST invoice + PDF; erp = record the number of an invoice made in Tally/ERP
+    mode: Literal["generate", "erp"] | None = None
+    invoice_number: str | None = Field(default=None, max_length=40)
     invoice_date: date | None = None
     lines: list[InvoiceLineIn] = []
+    notes: str | None = Field(default=None, max_length=1000)
 
 
 class DispatchIn(BaseModel):
@@ -155,6 +158,7 @@ class OrderDetail(ORM):
     hold_reasons: str | None
     approved_at: datetime | None
     approval_remark: str | None
+    invoice_id: uuid.UUID | None
     invoice_number: str | None
     invoice_date: date | None
     vehicle_number: str | None

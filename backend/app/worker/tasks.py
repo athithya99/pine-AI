@@ -119,6 +119,7 @@ def handle_buyer_message(message_id: str) -> None:
     from sqlalchemy import select
 
     from app.models import Customer, Direction, Order
+    from app.services import campaigns
     from app.services import orders as svc
     from app.services.ai import assistant
     from app.services.whatsapp import outbound
@@ -128,7 +129,13 @@ def handle_buyer_message(message_id: str) -> None:
         if msg is None or msg.direction != Direction.inbound:
             return
         customer = db.get(Customer, msg.customer_id)
-        button = svc.parse_button((msg.payload or {}).get("reply_id"))
+        reply_id = (msg.payload or {}).get("reply_id")
+        campaign_id = campaigns.parse_tap(reply_id)
+        if campaign_id is not None:  # "Order now" on a campaign message (M9)
+            campaigns.handle_tap(db, msg, campaign_id)
+            svc.commit_and_send(db)
+            return
+        button = svc.parse_button(reply_id)
         if button is None:
             try:
                 assistant.process_message(db, msg)
@@ -181,4 +188,69 @@ def expire_quotes() -> int:
     with SessionLocal() as db:
         n = svc.expire_due_quotes(db)
         svc.commit_and_send(db)
+    return n
+
+
+@celery_app.task(name="collections.reminders")
+def send_payment_reminders() -> dict:
+    """Daily (celery beat): payment reminders for every active company (FR-M8-01)."""
+    from sqlalchemy import select
+
+    from app.models import Tenant, TenantStatus
+    from app.services import orders as svc
+    from app.services.reminders import run_reminders
+
+    totals = {"customers": 0, "sent": 0, "skipped": 0}
+    with SessionLocal() as db:
+        for tenant in db.scalars(select(Tenant).where(Tenant.status == TenantStatus.active)):
+            try:
+                r = run_reminders(db, tenant)
+                svc.commit_and_send(db)
+                totals = {k: totals[k] + r[k] for k in totals}
+            except Exception:
+                db.rollback()
+                log.exception("Reminders failed for tenant %s", tenant.id)
+    return totals
+
+
+@celery_app.task(name="campaigns.dispatch")
+def dispatch_campaigns() -> int:
+    """Every minute (celery beat): start scheduled campaigns and continue ones waiting on the messaging limit."""
+    from app.services import campaigns
+    from app.services import orders as svc
+
+    with SessionLocal() as db:
+        try:
+            n = campaigns.run_due(db)
+            svc.commit_and_send(db)
+        except Exception:
+            db.rollback()
+            log.exception("Campaign dispatch failed")
+            return 0
+    return n
+
+
+@celery_app.task(name="assistant.daily_summaries")
+def daily_summaries() -> int:
+    """Every minute: the owner's daily summary once the company's set time has passed (FR-M10-08)."""
+    from app.services.automation import run_due_summaries
+
+    with SessionLocal() as db:
+        return run_due_summaries(db)
+
+
+@celery_app.task(name="assistant.rules")
+def owner_rules() -> int:
+    """Every 5 minutes: run owner rules (e.g. Monday reminders) that are due (FR-M10-09)."""
+    from app.services import orders as svc
+    from app.services.automation import run_due_rules
+
+    with SessionLocal() as db:
+        try:
+            n = run_due_rules(db)
+            svc.commit_and_send(db)
+        except Exception:
+            db.rollback()
+            log.exception("Owner rules failed")
+            return 0
     return n

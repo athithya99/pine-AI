@@ -167,6 +167,9 @@ export function Customers() {
             <button className="btn-secondary" onClick={() => navigate(`/orders?customer=${editing.id}`)}>Orders</button>
           )}
           {editing && editing !== 'new' && (
+            <button className="btn-secondary" onClick={() => navigate(`/customers/${editing.id}/ledger`)}>Ledger</button>
+          )}
+          {editing && editing !== 'new' && (
             <button className="btn-secondary" onClick={async () => {
               try {
                 const { data } = await api.post(`/inbox/customers/${editing.id}/conversation`)

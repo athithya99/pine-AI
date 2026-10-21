@@ -11,7 +11,10 @@ This repository holds the MVP described in the SRS.
 | WhatsApp channel | M4 WhatsApp channel: webhook, inbox, templates, 24-hour window, opt-out, simulator | Done, tested |
 | Orders | M6 Order management: status flow, credit check, approvals, buyer updates, Excel import/export | Done, tested |
 | AI ordering | M5 AI order capture: intents, catalog matching, quotes, corrections, photos, voice notes, AI log | Done, tested with the development AI; real provider needs an API key |
-| Invoices, collections, AI | M7 Invoices and ledger · M8 Collections · M9 Campaigns · M10 Assistant and dashboard | Planned |
+| Invoices | M7 Invoices and ledger: GST invoices from orders, Tally/ERP and uploaded invoices, credit notes, ledger, statements | Done, tested |
+| Collections | M8 Collections: reminders, payment links (Razorpay + simulator), payments, AI-read proofs, ageing | Done, tested |
+| Campaigns | M9 Campaigns: segments, test send, send now / schedule, messaging-limit throttling, "Order now", report | Done, tested |
+| AI assistant | M10 Buyer bot (outstanding, FAQ, Tamil/Hindi, handover) · business assistant · daily summary · owner rules · dashboard | Done, tested with the development AI; real provider needs an API key |
 
 ## Stack
 
@@ -26,18 +29,18 @@ This repository holds the MVP described in the SRS.
 ```
 backend/
   app/
-    api/v1/        auth, tenants, users, customers, catalog, whatsapp, orders, ai (routers)
+    api/v1/        auth, tenants, users, customers, catalog, whatsapp, orders, invoices, payments, ai, campaigns, assistant (routers)
     core/          config, database, security (JWT, OTP), deps (auth + roles), validators
     models/        SQLAlchemy models (every tenant table has tenant_id)
     schemas/       Pydantic request/response models
-    services/      pricing engine, order flow, Excel import/export, audit log, notifications, media storage
+    services/      pricing engine, order flow, invoices + ledger, GST, PDFs, Excel import/export, audit log, media
       whatsapp/    Cloud API client + simulator, inbound webhook processing, outbound sending rules
       ai/          AI providers (mock, Anthropic, OpenAI), speech-to-text, product matcher, WhatsApp assistant
     api/webhooks.py  public webhook endpoint (signature-verified)
     worker/        Celery app and background tasks
     cli.py         create-superadmin, seed-demo
   alembic/         migrations
-  tests/           pytest suite (105 tests, runs against PostgreSQL)
+  tests/           pytest suite (134 tests, runs against PostgreSQL)
 frontend/
   src/
     lib/           API client (token refresh), auth context, types
@@ -91,7 +94,7 @@ createdb -O pinesphere pinesphere_test
 cd backend && pytest
 ```
 
-Tests cover the SRS acceptance criteria for M1–M6, including cross-tenant isolation, session revocation on
+Tests cover the SRS acceptance criteria for M1–M10, including cross-tenant isolation, session revocation on
 deactivation, Sales-only-sees-own-customers, the 1,000-row import with 10 bad rows, price priority
 (customer price → price list → base), expired schemes, best-single-scheme selection, and out-of-stock flags.
 
@@ -185,6 +188,111 @@ price: matching is checked against the catalog in our code and prices come from 
   | `STT_PROVIDER` / `STT_API_KEY` | `none` | `openai` for voice notes (key optional when `AI_PROVIDER=openai`) |
 
   Text messages use the fast model; photos use the smart one.
+
+## Invoices and ledger (M7)
+
+- **From an approved order** (Orders → Create invoice), two ways:
+  - *Generate GST invoice*: number `INV/26-27/0001` (prefix in Settings → Company, max 16 characters), HSN, rate,
+    discount, taxable value, CGST + SGST at half the rate each for same-state buyers or IGST for other states (state
+    from the buyer's GSTIN, else their address), total rounded to the rupee, amount in words, PDF. Needs the company
+    GSTIN. The PDF goes to the buyer on WhatsApp as the order's "invoiced" update (can be switched off).
+  - *Already billed in Tally/ERP*: record that invoice number; attach its PDF later.
+  Lower invoiced quantities are recorded as short supply.
+- **Upload PDFs** (Invoices → Upload invoice PDFs): the AI reads number, date, customer, amounts and due date; each
+  stays in *Needs review* (not shared, not in the ledger) until Accounts/Admin/Owner confirm it. The development AI
+  reads text-based PDFs (most ERP exports); scanned PDFs need a real AI provider.
+- **Excel import** of invoices (one row per invoice) and **Attach PDFs** in bulk by file name = invoice number.
+- **Rules:** saved invoices are never edited, only cancelled with a reason (reverses the ledger entry and puts an
+  invoiced order back to Approved; after dispatch use a credit note). Due date = invoice date + customer's credit
+  days unless the invoice states one.
+- **Credit notes** with amount, reason and optional invoice (can't exceed that invoice's total).
+- **Ledger** per customer (Receivables → customer): opening balance + invoices − payments − credit notes with running
+  balance, statement PDF, send on WhatsApp. Opening balances can be imported from Excel at go-live. Order credit
+  checks now use this balance plus approved orders not yet invoiced.
+- **WhatsApp:** "send ledger" / "statement for September" sends the statement PDF; "send invoice INV/26-27/0003" or
+  "bill copy" sends the invoice PDF.
+- Not in the MVP: e-invoicing (IRN/QR). Sellers above the e-invoicing turnover limit keep invoicing in their ERP and
+  upload or import here.
+
+## Collections (M8)
+
+- **Recording payments** (Collections → Record payment, or from a customer's ledger): cash, cheque, UPI, NEFT, RTGS.
+  Confirmed payments go to the ledger and are adjusted against the oldest unpaid invoices first (or the ones you
+  tick); anything extra stays as an advance. Cheques stay *pending clearance* until marked cleared; a bounce after
+  clearing reverses it. Sales can record cash/cheque for their own customers; Admin can view.
+- **Duplicates:** a UTR / cheque number already recorded is refused (a bounced cheque can be re-presented).
+- **Buyer proofs on WhatsApp:** "paid 5000 by gpay UTR 4123…" (or a screenshot, with a real AI provider) becomes a
+  *To confirm* entry. Nothing is recorded until Accounts, Admin or Owner confirms. Sending the same UTR again gets a
+  "already recorded" reply.
+- **Receipts:** every confirmed payment sends a WhatsApp receipt with what it was adjusted against and the new balance
+  (inside the 24-hour window, or with an approved `payment_receipt` template).
+- **Payment links:** UPI/card/net banking links on the seller's own gateway, so money settles to the seller.
+  Settings → Payments: *Simulator* (default; links open a test page at `/pay/<id>`) or *Razorpay* (Key ID, Key
+  Secret, webhook secret; add the shown webhook URL in Razorpay with the `payment_link.paid` event). Paid links are
+  recorded, matched to invoices and receipted automatically; repeated webhooks are ignored.
+- **Reminders:** every morning (celery beat, `REMINDER_HOUR_IST`), on the steps chosen in Settings → Payments
+  (default 3 days before, due date, 7 and 15 days after), each buyer gets one message listing unpaid invoices, the
+  total due and a payment link. Each step is sent once per invoice. Skipped for paused invoices/customers and
+  opted-out buyers; outside the 24-hour window it needs an approved `payment_reminder` template
+  (`{{1}}` name, `{{2}}` amount, `{{3}}` link). "Send today's reminders" runs it now.
+- **Ageing** (not due, 0–30, 31–60, 61–90, 90+ days) with Excel export, and a collections dashboard.
+
+## Campaigns (M9)
+
+Owner and Admin only (Sales → Campaigns).
+
+- **Template:** an approved MARKETING template. Add an "Order now" quick-reply button to it. For an image or PDF
+  header, pick *Image* / *PDF* as the header in Settings → WhatsApp (simulator), or on a live number create the template
+  in WhatsApp Manager (Meta needs a sample file) and press **Sync**: templates made there are imported.
+- **Variables:** each `{{n}}` is either the same text for everyone or a customer field (first name, contact person,
+  business name, city, state, outstanding amount, sales person).
+- **Segment:** customer type, tags, city/state, sales person, last order (none in N days / ordered in last N days),
+  outstanding amount range. The panel shows the live count, how many are excluded (opted out, no opt-in) and the
+  estimated Meta charge (count × the rate in Company settings).
+- **Test send** to one number (saved as a customer with opt-in), then **Send now** or **Schedule** (IST). The buyer
+  list is frozen when sending starts; the count confirmed on screen must still match or the send is refused.
+- **Throttling:** never more than the number's messaging limit (Company settings, default 1,000 buyers per 24 hours).
+  The rest wait and go out automatically as the limit frees up (celery beat task `campaigns.dispatch`, every minute;
+  in local development without beat, opening the Campaigns screen catches up). The attachment is uploaded to Meta
+  once per campaign.
+- **"Order now":** the bot replies with the campaign's products and the buyer's own prices; their reply goes through
+  the normal AI order flow (quote → Confirm).
+- **Report:** buyers, excluded (with reasons), sent, delivered, read, failed (with Meta's reason, not retried), replied
+  and "Order now" taps; orders placed (confirmed onward) by recipients within 7 days of their message and their value.
+  Per-buyer list with filters. Stop sending at any time; buyers not yet messaged are skipped.
+
+## AI assistant and dashboard (M10)
+
+**Buyer bot (WhatsApp).** On top of M5 ordering it answers, for that buyer only:
+- prices, schemes and stock (M5), order status, and **outstanding** ("my outstanding?", "என் நிலுவை", "मेरा बकाया")
+  with unpaid invoices, due dates and a payment link;
+- general questions from **Bot FAQ** (Settings → Bot FAQ; optional Tamil/Hindi answers; "Try it" box);
+- replies in the language the buyer wrote in (Tamil script → Tamil, Devanagari → Hindi, else English).
+- Asking about another buyer's account ("what is Kumar Stores' outstanding?") gets a polite refusal and no data.
+- **Handover:** "talk to a person", complaints, or a question it can't answer → the bot replies once, switches itself
+  off for that chat and flags it: "Needs a person" badge and filter in the Inbox, count on the Inbox menu and the
+  dashboard. Replying (or "Mark handled") clears it.
+
+**Ask AI (staff).** Plain-language questions, e.g. "who is above 60 days overdue?", "top 10 customers this month",
+"customers with no order in 30 days", "how much did we collect this week?", "invoices due this week". Answer as text +
+table, export to Excel. The AI only chooses one of 12 fixed reporting functions (`services/analytics.py`) and its
+parameters; it never writes SQL, so every figure comes from the database, data is always limited to the company, and
+Sales users only get their own customers. Questions it can't map get "I won't guess". The development AI uses a
+rule-based router; with `AI_PROVIDER` set the LLM picks the function.
+
+**Owner rules.** The owner can type "remind everyone above 60 days every Monday at 10am": the assistant shows the rule
+and creates it only after **Confirm**. Rules run from celery beat (`assistant.rules`, every 5 minutes) and can be
+paused or deleted on the Ask AI page.
+
+**Daily summary.** At the time set on the Ask AI page (default 09:00 IST), yesterday's orders, collections, newly
+overdue invoices, approvals waiting and unanswered chats go to the owner's WhatsApp (owner's mobile or another number)
+and are shown on the dashboard. Celery beat (`assistant.daily_summaries`, every minute) sends it once per day. On a
+live number it needs an approved utility template named `daily_summary` with 6 variables (date, orders, collections,
+newly overdue, approvals, chats); otherwise it only reaches the owner within 24 hours of them messaging the business
+number.
+
+**Dashboard.** Period picker; order value and count, orders by source, collections, outstanding and overdue, top
+customers and products, AI match rate (items matched vs asked back), daily charts, and a "Needs attention" row.
 
 ## Not yet connected
 

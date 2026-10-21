@@ -16,7 +16,7 @@ interface Quote { lines: QuoteLine[]; taxable_total: string; gst_total: string; 
 const PRICE_SOURCE: Record<string, string> = { customer_price: 'Customer price', price_list: 'Price list', base_price: 'Base price' }
 
 /** Type-ahead picker used for customers and products. */
-function Picker<T extends { id: string }>({ placeholder, search, render, onPick, autoFocus }: {
+export function Picker<T extends { id: string }>({ placeholder, search, render, onPick, autoFocus }: {
   placeholder: string
   search: (q: string) => Promise<T[]>
   render: (t: T) => React.ReactNode

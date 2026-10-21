@@ -64,6 +64,24 @@ class AIResult:
 
 
 @dataclass
+class JsonResult:
+    """Free-form structured answer (e.g. fields read from an invoice PDF)."""
+    data: dict
+    provider: str
+    model: str
+    input_tokens: int = 0
+    output_tokens: int = 0
+    latency_ms: int = 0
+
+    @property
+    def cost_usd(self) -> Decimal | None:
+        p = PRICES.get(self.model)
+        if p is None:
+            return None
+        return (p[0] * self.input_tokens + p[1] * self.output_tokens) / Decimal(1_000_000)
+
+
+@dataclass
 class Transcript:
     text: str
     provider: str
@@ -157,6 +175,43 @@ class AnthropicProvider(Provider):
                         usage.get("input_tokens", 0), usage.get("output_tokens", 0), latency, raw=block.get("input"))
 
 
+    def extract_json(self, system: str, text: str, schema: dict, *, pdf: bytes | None = None,
+                     image: tuple[bytes, str] | None = None, fast: bool = False) -> JsonResult:
+        if not settings.AI_API_KEY:
+            raise AIError("AI_API_KEY is not set")
+        model = self.fast if fast and not (pdf or image) else self.smart
+        content: list[dict] = []
+        if pdf:
+            content.append({"type": "document", "source": {"type": "base64", "media_type": "application/pdf",
+                                                           "data": base64.b64encode(pdf).decode()}})
+        if image:
+            content.append({"type": "image", "source": {"type": "base64", "media_type": image[1],
+                                                        "data": base64.b64encode(image[0]).decode()}})
+        content.append({"type": "text", "text": text})
+        body = {"model": model, "max_tokens": 1500, "system": system, "messages": [{"role": "user", "content": content}],
+                "tools": [{"name": "record", "description": "Record the extracted fields", "input_schema": schema}],
+                "tool_choice": {"type": "tool", "name": "record"}}
+        start = time.monotonic()
+        try:
+            with _client({"x-api-key": settings.AI_API_KEY, "anthropic-version": "2023-06-01"}) as c:
+                r = c.post(f"{settings.ANTHROPIC_API_URL}/messages", json=body)
+        except httpx.HTTPError as exc:
+            raise AIError(f"Could not reach Anthropic: {exc}") from exc
+        latency = int((time.monotonic() - start) * 1000)
+        try:
+            data = r.json()
+        except ValueError:
+            data = {}
+        if r.status_code >= 400:
+            raise AIError(f"Anthropic error {r.status_code}: {data.get('error', {}).get('message') or r.text[:200]}")
+        block = next((b for b in data.get("content", []) if b.get("type") == "tool_use"), None)
+        if block is None:
+            raise AIError("Anthropic returned no structured answer")
+        usage = data.get("usage", {})
+        return JsonResult(block.get("input") or {}, self.name, data.get("model") or model,
+                          usage.get("input_tokens", 0), usage.get("output_tokens", 0), latency)
+
+
 class OpenAIProvider(Provider):
     name = "openai"
     vision = True
@@ -196,6 +251,44 @@ class OpenAIProvider(Provider):
         usage = data.get("usage", {})
         return AIResult(_parse_extraction(raw), self.name, data.get("model") or model,
                         usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0), latency, raw=raw)
+
+
+    def extract_json(self, system: str, text: str, schema: dict, *, pdf: bytes | None = None,
+                     image: tuple[bytes, str] | None = None, fast: bool = False) -> JsonResult:
+        if not settings.AI_API_KEY:
+            raise AIError("AI_API_KEY is not set")
+        model = self.fast if fast and not (pdf or image) else self.smart
+        content: list[dict] = [{"type": "text", "text": text}]
+        if image:
+            content.append({"type": "image_url",
+                            "image_url": {"url": f"data:{image[1]};base64,{base64.b64encode(image[0]).decode()}"}})
+        if pdf:
+            content.append({"type": "file", "file": {
+                "filename": "invoice.pdf", "file_data": f"data:application/pdf;base64,{base64.b64encode(pdf).decode()}"}})
+        body = {"model": model, "max_completion_tokens": 1500,
+                "messages": [{"role": "system", "content": system}, {"role": "user", "content": content}],
+                "response_format": {"type": "json_schema", "json_schema": {"name": "fields", "schema": schema,
+                                                                           "strict": False}}}
+        start = time.monotonic()
+        try:
+            with _client({"Authorization": f"Bearer {settings.AI_API_KEY}"}) as c:
+                r = c.post(f"{settings.OPENAI_API_URL}/chat/completions", json=body)
+        except httpx.HTTPError as exc:
+            raise AIError(f"Could not reach OpenAI: {exc}") from exc
+        latency = int((time.monotonic() - start) * 1000)
+        try:
+            data = r.json()
+        except ValueError:
+            data = {}
+        if r.status_code >= 400:
+            raise AIError(f"OpenAI error {r.status_code}: {data.get('error', {}).get('message') or r.text[:200]}")
+        try:
+            raw = json.loads(data["choices"][0]["message"]["content"])
+        except (KeyError, IndexError, TypeError, ValueError) as exc:
+            raise AIError("OpenAI returned no structured answer") from exc
+        usage = data.get("usage", {})
+        return JsonResult(raw, self.name, data.get("model") or model, usage.get("prompt_tokens", 0),
+                          usage.get("completion_tokens", 0), latency)
 
 
 PROVIDERS = {"mock": MockProvider, "anthropic": AnthropicProvider, "openai": OpenAIProvider}

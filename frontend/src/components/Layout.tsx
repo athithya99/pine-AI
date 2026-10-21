@@ -1,18 +1,20 @@
-import { useState } from 'react'
-import { NavLink, Outlet } from 'react-router-dom'
+import { useEffect, useState } from 'react'
+import { NavLink, Outlet, useLocation } from 'react-router-dom'
+import { api } from '../lib/api'
 import { useAuth } from '../lib/auth'
 import { ROLE_LABEL, isManager, type Role } from '../lib/types'
 
-type NavItem = { to: string; label: string; roles?: Role[]; soon?: boolean }
+type NavItem = { to: string; label: string; roles?: Role[]; soon?: boolean; badge?: 'attention' }
 
 const NAV: { section: string; items: NavItem[] }[] = [
-  { section: 'Overview', items: [{ to: '/', label: 'Dashboard' }] },
+  { section: 'Overview', items: [{ to: '/', label: 'Dashboard' }, { to: '/assistant', label: 'Ask AI' }] },
   {
     section: 'Sales',
     items: [
-      { to: '/inbox', label: 'Inbox' },
+      { to: '/inbox', label: 'Inbox', badge: 'attention' },
       { to: '/orders', label: 'Orders' },
       { to: '/customers', label: 'Customers' },
+      { to: '/campaigns', label: 'Campaigns', roles: ['owner', 'admin'] },
     ],
   },
   {
@@ -26,8 +28,9 @@ const NAV: { section: string; items: NavItem[] }[] = [
   {
     section: 'Finance',
     items: [
-      { to: '/invoices', label: 'Invoices', soon: true },
-      { to: '/collections', label: 'Collections', soon: true },
+      { to: '/invoices', label: 'Invoices' },
+      { to: '/receivables', label: 'Receivables' },
+      { to: '/collections', label: 'Collections' },
     ],
   },
   {
@@ -35,6 +38,8 @@ const NAV: { section: string; items: NavItem[] }[] = [
     items: [
       { to: '/users', label: 'Team', roles: ['owner', 'admin'] },
       { to: '/whatsapp', label: 'WhatsApp', roles: ['owner', 'admin'] },
+      { to: '/faq', label: 'Bot FAQ', roles: ['owner', 'admin'] },
+      { to: '/payment-settings', label: 'Payments', roles: ['owner', 'admin', 'accounts'] },
       { to: '/ai-usage', label: 'AI usage', roles: ['owner', 'admin'] },
       { to: '/settings', label: 'Company' },
     ],
@@ -44,6 +49,14 @@ const NAV: { section: string; items: NavItem[] }[] = [
 export function Layout() {
   const { me, logout } = useAuth()
   const [menuOpen, setMenuOpen] = useState(false)
+  const [attention, setAttention] = useState(0)
+  const loc = useLocation()
+  useEffect(() => {  // chats the bot handed over to a person (FR-M10-05)
+    const load = () => api.get<{ count: number }>('/inbox/attention').then((r) => setAttention(r.data.count)).catch(() => {})
+    load()
+    const t = setInterval(load, 60000)
+    return () => clearInterval(t)
+  }, [loc.pathname])
 
   const sidebar = (
     <nav className="flex h-full flex-col">
@@ -75,7 +88,8 @@ export function Layout() {
                     className={({ isActive }) =>
                       `block rounded-lg px-2 py-1.5 text-sm ${isActive ? 'bg-white/10 font-medium text-white' : 'text-pine-100/80 hover:bg-white/5 hover:text-white'}`}
                   >
-                    {i.label}
+                    <span className="flex items-center justify-between">{i.label}
+                      {i.badge === 'attention' && attention > 0 && <span className="rounded-full bg-amber-400 px-1.5 text-[11px] font-semibold text-pine-900" title="Chats the bot handed to a person">{attention}</span>}</span>
                   </NavLink>
                 ),
               )}

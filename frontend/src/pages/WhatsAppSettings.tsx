@@ -9,7 +9,7 @@ const STATUS_BADGE: Record<string, string> = {
   PAUSED: 'bg-slate-100 text-slate-600', DISABLED: 'bg-slate-100 text-slate-600', DRAFT: 'bg-slate-100 text-slate-600',
 }
 
-const emptyTpl = { name: '', category: 'UTILITY', language: 'en', header_text: '', body: '', footer: '', buttons: '', example_values: '' }
+const emptyTpl = { name: '', category: 'UTILITY', language: 'en', header_format: 'TEXT', header_text: '', body: '', footer: '', buttons: '', example_values: '' }
 
 export function WhatsAppSettings() {
   const { me } = useAuth()
@@ -68,7 +68,8 @@ export function WhatsAppSettings() {
     try {
       await api.post('/whatsapp/templates', {
         name: tpl.name, category: tpl.category, language: tpl.language, body: tpl.body,
-        header_text: tpl.header_text || null, footer: tpl.footer || null,
+        header_format: tpl.header_format === 'TEXT' ? null : tpl.header_format,
+        header_text: tpl.header_format === 'TEXT' ? tpl.header_text || null : null, footer: tpl.footer || null,
         buttons: tpl.buttons.split(',').map((b) => b.trim()).filter(Boolean).map((text) => ({ type: 'QUICK_REPLY', text })),
         example_values: vars ? tpl.example_values.split(',').map((v) => v.trim()).filter(Boolean) : [],
       })
@@ -158,6 +159,7 @@ export function WhatsAppSettings() {
                   <div className="font-mono text-sm">{t.name} <span className="text-xs text-slate-400">· {t.language} · {t.category.toLowerCase()}</span></div>
                   <span className={`badge ${STATUS_BADGE[t.status]}`}>{t.status.toLowerCase()}</span>
                 </div>
+                {(t.header_format === 'IMAGE' || t.header_format === 'DOCUMENT') && <div className="mt-1 text-xs text-slate-500">Header: {t.header_format === 'IMAGE' ? '🖼 image' : '📄 PDF'} (attached when sending)</div>}
                 <p className="mt-1 whitespace-pre-wrap text-sm text-slate-600">{t.body}</p>
                 {t.buttons && <div className="mt-1 text-xs text-slate-500">Buttons: {t.buttons.map((b) => b.text).join(', ')}</div>}
                 {t.rejection_reason && <div className="mt-1 text-xs text-red-600">{t.rejection_reason}</div>}
@@ -197,7 +199,16 @@ export function WhatsAppSettings() {
               </select>
             </Field>
           </div>
-          <Field label="Header (optional)"><input className="input" maxLength={60} value={tpl.header_text} onChange={(e) => setTpl({ ...tpl, header_text: e.target.value })} /></Field>
+          <div className="grid grid-cols-[140px_1fr] gap-2">
+            <Field label="Header">
+              <select className="input" value={tpl.header_format} onChange={(e) => setTpl({ ...tpl, header_format: e.target.value })}>
+                <option value="TEXT">Text / none</option><option value="IMAGE">Image</option><option value="DOCUMENT">PDF</option>
+              </select>
+            </Field>
+            {tpl.header_format === 'TEXT'
+              ? <Field label="Header text (optional)"><input className="input" maxLength={60} value={tpl.header_text} onChange={(e) => setTpl({ ...tpl, header_text: e.target.value })} /></Field>
+              : <p className="self-end pb-2 text-xs text-slate-500">The file is attached per campaign. On a live number, create image/PDF templates in WhatsApp Manager (Meta needs a sample file), then press Sync.</p>}
+          </div>
           <Field label="Body *" hint="Use {{1}}, {{2}} for values filled in when sending, e.g. Hi {{1}}, invoice {{2}} is due.">
             <textarea className="input" rows={4} maxLength={1024} value={tpl.body} onChange={(e) => setTpl({ ...tpl, body: e.target.value })} />
           </Field>
